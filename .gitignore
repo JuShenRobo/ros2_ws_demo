@@ -1,0 +1,39 @@
+# ROS 2编译目录（核心忽略）
+build/
+install/
+log/
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+
+# 临时文件（本项目生成的图片/数据）
+rgb.png
+dep.npy
+*.stcm
+*.slam
+
+# IDE/编辑器配置
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 系统临时文件
+*.log
+*.tmp
+*.bak
+
+# Thrift生成文件（若有）
+gen_py/
+
+# 标定文件（可选：若包含敏感路径，建议忽略，或替换为示例路径）
+# eye_hand_calib/data/
+
+# DucoCobotAPI（若为第三方库，建议用submodule，或忽略后写说明）
+# DucoCobotAPI/
