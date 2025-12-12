@@ -13,8 +13,20 @@ import cv2
 import numpy as np
 import os
 import json
+from typing import Any, Dict, List, Optional, Sequence
 script_dir = os.path.dirname(os.path.realpath(__file__))
 os.chdir(script_dir)
+import time
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+    try:
+        import openai  # type: ignore
+    except ImportError:
+        openai = None
+else:
+    openai = None
 
 from nav_msgs.msg import Odometry
 # from geometry_msgs.msg import Pose, Point, Quaternion, Twist, PoseStamped
@@ -23,7 +35,6 @@ from grasp_topic.msg import Camera, Pose
 import pyrealsense2 as rs
 from std_msgs.msg import String, Bool
 from collections import deque
-import time
 
 sys.path.append('/home/yofo/DucoCobotAPI') # debug：替换为实际路径
 from DucoCobotAPI_py.SiasunRobot import SiasunRobotPythonInterface
@@ -32,18 +43,40 @@ from DucoCobotAPI_py.SlamwareInterface_ros2 import SlamwareInterface # debug
 sys.path.append('/home/yofo/ros2_ws_demo/src/grasp_topic') # debug：替换为实际路径
 from utils.script_utils import euler_to_rotation_matrix, rotation_matrix_to_euler, getch
 
-import time
-
 from control_host_model import Button_yolo
+
+sys.path.append('/home/yofo/ros2_ws_demo/src/slamware_ros_sdk') # debug：替换为实际路径
+# map
+from slamware_ros_sdk.srv import SyncSetStcm
+from rclpy.callback_groups import ReentrantCallbackGroup
+import select
+import tty
+import termios
+
 
 '''MobileManipulatorInterface类是一个手动交互模式, 通过按键来触发任务；
     它在控制主机上主动发布任务;
     采用临时订阅模式, 只在特定用户操作时（按下按键）需要数据
 '''
+
+def kbhit():
+    return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
+def getch():
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ch
+
 class MobileManipulatorInterface(Node):
      # 构造函数：各种硬件和ros节点的初始化
     def __init__(self, verbose=True):
         super().__init__('mobile_manipulator')
+
+        #<----manipulation-------
         # 控制输出调试信息
         self.verbose = verbose
         self.echo_info('========== Mobile manipulator initializing ... ==========')
@@ -86,45 +119,118 @@ class MobileManipulatorInterface(Node):
         self.align = rs.align(rs.stream.color)
         self.echo_info('=> Camera initialized!')
 
-        self.echo_info('=> Mobile base initializing ...') # debug
-        self.mobile_base = SlamwareInterface()
-        self.echo_info('=> Mobile base initialized.')
 
+        #<------navigation------
+ # self.echo_info('=> Mobile base initializing ...') # debug
+        # self.mobile_base = SlamwareInterface()
+        # self.echo_info('=> Mobile base initialized.')
+
+        # self.obj_pose = None
+        # self.operate_pose = None
+        # self.button_pose = None
+        # self.card_pose = None
+        # self.get_floor = False
+        # # Track whether the gripper currently holds an object for pocket logic.
+        # self.object_state = 'empty'
+        # # Load reusable poses for elevator and pocket operations.
+        # self.pose_config = self.load_pose_config()
+        # self.floor_maps_dict = {'1':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/try2.stcm",
+        #                         '2':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor2.stcm",
+        #                         '3':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor3.stcm"}
+        # self.button_yolo = Button_yolo()
+        
+        # # 创建订阅者
+        # self.obj_pose_sub = self.create_subscription(
+        #     Pose, 
+        #     '/pose', 
+        #     self.estimate_obj_callback, 
+        #     10)
+            
+        # self.button_pose_sub = self.create_subscription(
+        #     Pose, 
+        #     '/button_pose', 
+        #     self.estimate_button_callback, 
+        #     10)
+            
+        # self.floor_sub = self.create_subscription(
+        #     Pose, 
+        #     '/floor', 
+        #     self.observe_floor, 
+        #     10)
+            
+        # self.echo_info('========== Mobile manipulator initialized! ==========')
+        self.echo_info('========== Mobile manipulator initializing ... ==========')
+        self.mode=""
+        self.start_floor=1
+        self.target_floor=2
+        self.nav_sequence=['1','2']
+
+        ##relocalize
+        self.floor_maps_dict = {'1':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor1 5.12_1.stcm",
+                                '2':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor2-5.12_1.stcm",
+                                '3':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor3_1207.stcm"}
+        self.set_stcm_client = self.create_client(SyncSetStcm, '/sync_set_stcm') #ros2 service list | grep stcm.
+        while not self.set_stcm_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('等待 sync_set_stcm 服务...')
+
+        self.echo_info('=> Mobile base initializing ...')
+        self.mobile_base = SlamwareInterface() #这个接口得符合ros2库安装，然后索引到
+
+        # === 数据存储 ===
         self.obj_pose = None
-        self.operate_pose = None
         self.button_pose = None
         self.card_pose = None
+        self.tcp2base = None
         self.get_floor = False
-        # Track whether the gripper currently holds an object for pocket logic.
         self.object_state = 'empty'
-        # Load reusable poses for elevator and pocket operations.
-        self.pose_config = self.load_pose_config()
-        self.floor_maps_dict = {'1':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/try2.stcm",
-                                '2':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor2.stcm",
-                                '3':"/home/yofo/ros2_ws_demo/src/slamware_ros_sdk/maps/floor3.stcm"}
-        self.button_yolo = Button_yolo()
-        
-        # 创建订阅者
-        self.obj_pose_sub = self.create_subscription(
-            Pose, 
-            '/pose', 
-            self.estimate_obj_callback, 
-            10)
-            
-        self.button_pose_sub = self.create_subscription(
-            Pose, 
-            '/button_pose', 
-            self.estimate_button_callback, 
-            10)
-            
-        self.floor_sub = self.create_subscription(
-            Pose, 
-            '/floor', 
-            self.observe_floor, 
-            10)
-            
+        self.operate_pose = None
+        self.current_floor = self.start_floor 
         self.echo_info('========== Mobile manipulator initialized! ==========')
+
+
+    def _load_map_for_floor(self, floor_key_str):
+        if floor_key_str not in self.floor_maps_dict:
+            self.get_logger().error(f"未定义楼层 '{floor_key_str}' 的地图文件.")
+            return False
+
+        map_file_path = self.floor_maps_dict[floor_key_str]
+        self.get_logger().info(f"为楼层 '{floor_key_str}' 加载地图: {map_file_path}")
+
+        if not os.path.isfile(map_file_path):
+            self.get_logger().error(f"地图文件不存在: {map_file_path}")
+            return False
+
+        try:
+            with open(map_file_path, 'rb') as f:
+                map_data = f.read()
+        except Exception as e:
+            self.get_logger().error(f"读取地图文件失败: {e}")
+            return False
+
+        # 构造请求
+        req = SyncSetStcm.Request()
+        req.raw_stcm = map_data
+        req.robot_pose.position = Point(x=0.0, y=0.0, z=0.0)
+        req.robot_pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+
+        # 同步调用服务（关键修改在这里！）
+        future = self.set_stcm_client.call_async(req)
+
+        # 等待服务返回（同步阻塞，但简单可靠）
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+
+        if future.result() is not None:
+            response = future.result()
+            self.get_logger().info(f"楼层 '{floor_key_str}' 地图加载成功.")
+            # 等待3秒（可以用 time.sleep，因为已经是同步逻辑）
+            import time
+            time.sleep(3.0)
+            return True
+        else:
+            self.get_logger().error("服务调用失败或超时")
+            return False
         
+
     def echo_info(self, info):
         if self.verbose:
             self.get_logger().info(info)
@@ -181,47 +287,7 @@ class MobileManipulatorInterface(Node):
             return False
         time.sleep(2)  # 等待地图加载
         return True
-    def _load_map_for_floor(self, floor_key_str):
-        if floor_key_str not in self.floor_maps_dict:
-            self.get_logger().error(f"未定义楼层 '{floor_key_str}' 的地图文件.")
-            return False
 
-        map_file_path = self.floor_maps_dict[floor_key_str]
-        self.get_logger().info(f"为楼层 '{floor_key_str}' 加载地图: {map_file_path}")
-
-        if not os.path.isfile(map_file_path):
-            self.get_logger().error(f"地图文件不存在: {map_file_path}")
-            return False
-
-        try:
-            with open(map_file_path, 'rb') as f:
-                map_data = f.read()
-        except Exception as e:
-            self.get_logger().error(f"读取地图文件失败: {e}")
-            return False
-
-        # 构造请求
-        req = SyncSetStcm.Request()
-        req.raw_stcm = map_data
-        req.robot_pose.position = Point(x=0.0, y=0.0, z=0.0)
-        req.robot_pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
-
-        # 同步调用服务（关键修改在这里！）
-        future = self.set_stcm_client.call_async(req)
-
-        # 等待服务返回（同步阻塞，但简单可靠）
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-
-        if future.result() is not None:
-            response = future.result()
-            self.get_logger().info(f"楼层 '{floor_key_str}' 地图加载成功.")
-            # 等待3秒（可以用 time.sleep，因为已经是同步逻辑）
-            import time
-            time.sleep(3.0)
-            return True
-        else:
-            self.get_logger().error("服务调用失败或超时")
-            return False
     def relocalize_on_floor(self, initial_pose=None):
         """在当前楼层执行重定位"""
         self.echo_info("=> Performing relocalization...")
@@ -232,6 +298,315 @@ class MobileManipulatorInterface(Node):
             time.sleep(1)
             success = self.mobile_base.relocalize(initial_pose)
         return success
+    
+    def navigate_to_waypoint(self, pose):
+        """导航至预设路点"""
+        self.echo_info(f'=> Navigating to waypoint: {pose} on floor {self.current_floor}')
+        return self.mobile_base.nav_to_pose(pose)
+
+    def _pose_to_text(self, pose: Optional[GeoPose]) -> str:
+        if pose is None:
+            return 'None'
+        pos = pose.position
+        ori = pose.orientation
+        return f"pos=({pos.x:.2f},{pos.y:.2f},{pos.z:.2f}),ori=({ori.x:.2f},{ori.y:.2f},{ori.z:.2f},{ori.w:.2f})"
+
+    def _normalize_pose_input(self, pose_data: Any) -> Optional[GeoPose]:
+        if pose_data is None:
+            return None
+        if isinstance(pose_data, GeoPose):
+            return pose_data
+        if isinstance(pose_data, PoseStamped):
+            return pose_data.pose
+        if isinstance(pose_data, dict):
+            if 'pose' in pose_data:
+                return self._normalize_pose_input(pose_data['pose'])
+            pos = pose_data.get('position', {})
+            ori = pose_data.get('orientation', {})
+            try:
+                return GeoPose(
+                    position=Point(float(pos.get('x', 0.0)), float(pos.get('y', 0.0)), float(pos.get('z', 0.0))),
+                    orientation=Quaternion(
+                        float(ori.get('x', 0.0)),
+                        float(ori.get('y', 0.0)),
+                        float(ori.get('z', 0.0)),
+                        float(ori.get('w', 1.0))
+                    )
+                )
+            except (TypeError, ValueError):
+                return None
+        if isinstance(pose_data, Sequence) and len(pose_data) == 7:
+            try:
+                return GeoPose(
+                    position=Point(float(pose_data[0]), float(pose_data[1]), float(pose_data[2])),
+                    orientation=Quaternion(
+                        float(pose_data[3]), float(pose_data[4]), float(pose_data[5]), float(pose_data[6])
+                    )
+                )
+            except (TypeError, ValueError):
+                return None
+        return None
+
+
+    def _call_openai_planner(self, instruction: str, skills: List[Dict[str, Any]], model: str) -> Optional[Dict[str, Any]]:
+        # from dotenv import load_dotenv
+        # load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+        # api_key = os.environ.get('OPENAI_API_KEY')
+
+        # 加载并打印加载状态
+        # load_status = load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+        # print(f".env 文件是否加载成功：{load_status}")  # True=加载成功，False=文件不存在/无法读取
+
+        # api_key = os.environ.get('OPENAI_API_KEY')
+        # print(f"读取到的 API Key：{api_key}")  # 若打印 None，说明加载/格式有问题；若打印 sk-xxx，说明加载成功
+
+        # if not api_key:
+        #     self.get_logger().error('OPENAI_API_KEY is not set.')
+        #     return None
+
+        # print(skills)
+        skill_lines = '\n'.join(
+            f"- id:{s['id']} type:{s['type']} op:{s.get('operation')} pose:{s.get('pose')} {s.get('description')}"
+            for s in skills
+        )
+        user_prompt = (
+            f"Instruction: {instruction}\n"
+            "Using only the skills below, return JSON {\"actions\": [...]}.\n"
+            "Each action must have \"type\" (navigate|manipulate) and \"target\" (skill id).\n"
+            "For manipulate include \"operation\" (pick/place/store) and optional \"height\" in meters.\n"
+            f"Skills:\n{skill_lines}"
+        )
+        sys_prompt = 'Plan sequential steps for a mobile manipulator and answer with JSON only.'
+        try:
+            # if OpenAI is not None:
+            #     client = OpenAI(api_key=api_key)
+            #     resp = client.responses.create(
+            #         model=model,
+            #         input=[{'role': 'system', 'content': sys_prompt},
+            #                {'role': 'user', 'content': user_prompt}],
+            #         temperature=0.2,
+            #     )
+            #     text = ''.join(
+            #         block.text
+            #         for item in getattr(resp, 'output', [])
+            #         for block in getattr(item, 'content', [])
+            #         if getattr(block, 'type', None) == 'text'
+            #     )
+            # elif openai is not None:
+            #     openai.api_key = api_key
+            #     completion = openai.ChatCompletion.create(
+            #         model=model,
+            #         temperature=0.2,
+            #         messages=[{'role': 'system', 'content': sys_prompt},
+            #                   {'role': 'user', 'content': user_prompt}]
+            #     )
+            #     text = completion['choices'][0]['message']['content']
+            # else:
+            #     self.get_logger().error('OpenAI SDK not installed.')
+            #     return None
+            # client = OpenAI(
+            #     api_key="", 
+            #     # 以下为新加坡地域base_url，若使用北京地域的模型，需将base_url替换为https://dashscope.aliyuncs.com/compatible-mode/v1
+            #     # base_url=""
+            #     base_url=""
+            # )
+            # completion = client.chat.completions.create(
+            #     model="qwen2.5-1.5b-instruct",
+            #     messages=[{"role": "user", "content": "你是谁？"}]
+            # )
+
+            client = OpenAI(
+                # openai系列的sdk，包括langchain，都需要这个/v1的后缀
+                base_url='',
+                api_key='',
+            )
+            chat_completion = client.chat.completions.create(
+                messages=[
+                                        {
+                        "role":"system",
+                        "content":sys_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content":user_prompt
+                    }
+                ],
+                model="gpt-3.5-turbo", # 如果是其他兼容模型，比如deepseek，直接这里改模型名即可，其他都不用动
+            )
+            text = chat_completion.choices[0].message.content #['choices'] #[0]['message']['content']
+            print(text)
+
+        except Exception as exc:
+            self.get_logger().error(f'OpenAI call failed: {exc}')
+            return None
+        text = text.strip()
+        start, end = text.find('{'), text.rfind('}')
+        json_text = text[start:end + 1] if start != -1 and end != -1 else text
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError as exc:
+            self.get_logger().error(f'Planner output is not JSON: {exc}')
+            self.get_logger().error(json_text)
+            return None
+
+    def _perform_pick_sequence(self) -> bool:
+        try:
+            color_image, _, depth_data = self.get_observation()
+            self.tcp2base = self.robot.get_RT_matrix()
+            self.tcp2base[:3, 3] = self.tcp2base[:3, 3] / 1000
+            self.deliver_image(color_image, depth_data)
+            future = rclpy.task.Future()
+
+            def callback(msg):
+                self.estimate_obj_callback(msg)
+                if not future.done():
+                    future.set_result(True)
+
+            subscription = self.create_subscription(Pose, '/pose', callback, 10)
+            rclpy.spin_until_future_complete(self, future)
+            self.destroy_subscription(subscription)
+            self.grasp_obj()
+            return True
+        except Exception as exc:
+            self.get_logger().error(f'Pick pipeline failed: {exc}')
+            return False
+
+    def _perform_place_sequence(self, height: float) -> bool:
+        try:
+            self.place_at_fixed_height(height)
+            return True
+        except Exception as exc:
+            self.get_logger().error(f'Place pipeline failed: {exc}')
+            return False
+
+    def execute_instruction_with_gpt(
+        self,
+        instruction: str,
+        knowledge_base: Sequence[Dict[str, Any]],
+        model: str = 'gpt-4o-mini',
+        default_place_height: float = 0.75,
+    ) -> bool:
+
+        skills = [
+            {
+                "id": "yellow_table_nav",
+                "type": "navigate",
+                "pose": 
+                GeoPose(position=Point(x=-1.301, y=0.136, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=0.711, w=0.703)),
+                "description": "Base pose facing the yellow table."
+            },
+            {
+                "id": "yellow_table_pick",
+                "type": "manipulate",
+                "operation": "pick",
+                "description": "Use vision grasp pipeline on the yellow table cup."
+            },
+            {
+                "id": "white_table_nav",
+                "type": "navigate",
+                "pose": GeoPose(position=Point(x=0.750, y=-0.843, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=0.684, w=0.729)),
+                "description": "Base pose near the white table."
+            },
+            {
+                "id": "white_table_place",
+                "type": "manipulate",
+                "operation": "place",
+                "height": 0.78,
+                "description": "Place the cup onto the white table (0.78 m)."
+            }
+        ]
+
+        plan = self._call_openai_planner(instruction, skills, model)
+        if not plan:
+            return False
+
+        print(plan)
+        # return
+
+        # plan={
+            # "actions": [
+                # {
+                # "type": "navigate",
+                # "target": "white_table_nav",
+                # "reason": "Drive to the white table to place the cup."
+                # },
+                # {
+                # "type": "manipulate",
+                # "target": "white_table_place",
+                # "operation": "pick",
+                # "reason": "Pick up the cup from the yellow table."
+                # },
+                # {
+                # "type": "navigate",
+                # "target": "yellow_table_nav",
+                # "reason": "Move to the yellow table with the cup."
+                # },
+                # {
+                # "type": "manipulate",
+                # "target": "yellow_table_pick",
+        #         "operation": "place",
+        #         "height": 0.78,
+        #         "reason": "Place the cup onto the white table surface."
+        #         }
+        #     ]
+        # }
+
+
+        actions = plan.get('actions') or plan.get('steps')
+
+        #log
+        if not isinstance(actions, list):
+            self.get_logger().error('Planner output missing actions list.')
+            return False
+        
+
+        skills_map = {s['id']: s for s in skills}
+        for idx, action in enumerate(actions, 1):
+            action_type = str(action.get('type') or '').lower()
+            target_id = action.get('target')
+            self.echo_info(f'GPT step {idx}: {action}')
+            
+            #导航
+            if action_type == 'navigate':
+                pose = None
+                if target_id and target_id in skills_map:
+                    pose = skills_map[target_id].get('pose')  #获取导航位姿
+                pose = pose or self._normalize_pose_input(action.get('pose')) #还是pose
+                # if pose is None or not self.navigate_to_waypoint(pose):
+                #     self.get_logger().error(f'Navigation failed at step {idx}')
+                #     return False
+                self.navigate_to_waypoint(pose)
+            
+            elif action_type == 'manipulate':
+                skill = skills_map.get(target_id or '')
+                operation = str(action.get('operation') or (skill or {}).get('operation') or 'pick').lower()
+                
+                #高度，place
+                height = action.get('height')
+                if height is None and skill is not None:
+                    height = skill.get('height')
+                height = float(height) if height is not None else default_place_height
+                
+                #pick
+                if operation in ('pick', 'grasp'):
+                    if not self._perform_pick_sequence():
+                        return False
+                #place
+                elif operation in ('place', 'drop'):
+                    if not self._perform_place_sequence(height):
+                        return False
+                # elif operation in ('store', 'stow'):
+                #     self.store_object_in_pocket()
+                else:
+                    self.get_logger().error(f'Unknown manipulation op "{operation}"')
+                    return False
+            else:
+                self.get_logger().error(f'Unknown action type "{action_type}"')
+                return False
+            time.sleep(2)
+
+        return True
+
     def load_pose_config(self):
         """Read pose/gripper presets for pocket and elevator routines."""
         config_dir = os.path.abspath(os.path.join(script_dir, '..', 'config'))
@@ -865,6 +1240,8 @@ class MobileManipulatorInterface(Node):
             "Please enter from keyboard (NO NEED TO ENTER) >>"
         )
 
+
+    # def 
     # 最终循环执行交互式任务的函数
     def run(self):
         print("\n========================================")
@@ -1140,10 +1517,13 @@ class DedupePlanSubscriber(Node):
         self.get_logger().info("Dedupe subscriber ready (will skip duplicate commands)")
 
 
+
      # 最终就是通过这个回调函数实现自动化任务处理！！！
     '''控制主机监听到视觉主机发来的单个plan --> 判断是否是重复命令 --> 执行新命令，发布执行成功状态 --> 
         视觉主机接收到当前任务执行成功，发布下一个任务
     '''
+
+
     def plan_callback(self, msg):
         """处理新命令（跳过重复命令）"""
         if msg.data in self.processed_commands:
@@ -1214,7 +1594,11 @@ def main(args=None):
         node.destroy_node()
     else:
         node = MobileManipulatorInterface()
-        node.run()
+        # node.run()
+        instruction="pick the cup on the white desk, and place it on the yellow desk"
+        knowledge_base="poses"
+        # model=""
+        node.execute_instruction_with_gpt(instruction,knowledge_base)
         node.destroy_node()
     
     rclpy.shutdown()

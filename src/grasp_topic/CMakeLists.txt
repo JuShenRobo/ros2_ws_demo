@@ -75,6 +75,7 @@ install(
 # 安装Python脚本（如果有）
 install(PROGRAMS
   scripts/grasp_duco_ros2.py
+  scripts/xinhai_connect.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
