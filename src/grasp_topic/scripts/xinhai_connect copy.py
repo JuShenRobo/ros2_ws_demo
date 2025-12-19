@@ -127,11 +127,7 @@ class MobileManipulatorInterface(Node):
             self.voice_text_callback,
             10
         )
-        # === 新增：语音触发相关状态 ===
-        self.pending_voice_instruction: Optional[str] = None  # 等待执行的语音指令
-        self.voice_task_done: bool = False                    # 只执行一次
         self.echo_info('=> Voice instruction subscriber ready.')
-        self.voice_instruction_queue: deque[str] = deque()
 
 
         #<------navigation------
@@ -260,44 +256,30 @@ class MobileManipulatorInterface(Node):
         self.pub_image.publish(img_msg)
         self.echo_info('- Image delivered!')
         
-    # def voice_text_callback(self, msg: String):
-    #     """Handle free-form instructions coming from the vision host."""
-    #     instruction = (msg.data or '').strip()
-    #     if not instruction:
-    #         self.get_logger().info('Received empty voice instruction on /voice_text; ignoring.')
-    #         return
-
-    #     if self.voice_processing:
-    #         self.get_logger().warn('Voice instruction already in progress; please wait before sending another.')
-    #         return
-
-    #     self.echo_info(f'Voice instruction received: "{instruction}"')
-    #     self.voice_processing = True
-    #     try:
-    #         success = self.execute_instruction_with_gpt(
-    #             instruction=instruction,
-    #             knowledge_base=[],
-    #         )
-    #         if success:
-    #             self.echo_info('Voice instruction finished successfully.')
-    #         else:
-    #             self.get_logger().error('Voice instruction failed, see logs for details.')
-    #     finally:
-    #         self.voice_processing = False
-
     def voice_text_callback(self, msg: String):
-        """只负责接收 /voice_text 并存一条指令，真正执行放到主循环里。"""
+        """Handle free-form instructions coming from the vision host."""
         instruction = (msg.data or '').strip()
         if not instruction:
             self.get_logger().info('Received empty voice instruction on /voice_text; ignoring.')
             return
 
-        # self.voice_instruction_queue.append(instruction)
-        # self.echo_info(
-        #     f'Queued voice instruction: "{instruction}" (queue size={len(self.voice_instruction_queue)})'
-        # )
-        self.pending_voice_instruction = instruction
-        self.echo_info(f'Latched voice instruction: "{instruction}"')
+        if self.voice_processing:
+            self.get_logger().warn('Voice instruction already in progress; please wait before sending another.')
+            return
+
+        self.echo_info(f'Voice instruction received: "{instruction}"')
+        self.voice_processing = True
+        try:
+            success = self.execute_instruction_with_gpt(
+                instruction=instruction,
+                knowledge_base=[],
+            )
+            if success:
+                self.echo_info('Voice instruction finished successfully.')
+            else:
+                self.get_logger().error('Voice instruction failed, see logs for details.')
+        finally:
+            self.voice_processing = False
         
     
         
@@ -402,15 +384,28 @@ class MobileManipulatorInterface(Node):
 
 
     def _call_openai_planner(self, instruction: str, skills: List[Dict[str, Any]], model: str) -> Optional[Dict[str, Any]]:
+        # from dotenv import load_dotenv
+        # load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+        # api_key = os.environ.get('OPENAI_API_KEY')
 
+        # 加载并打印加载状态
+        # load_status = load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+        # print(f".env 文件是否加载成功：{load_status}")  # True=加载成功，False=文件不存在/无法读取
+
+        # api_key = os.environ.get('OPENAI_API_KEY')
+        # print(f"读取到的 API Key：{api_key}")  # 若打印 None，说明加载/格式有问题；若打印 sk-xxx，说明加载成功
+
+        # if not api_key:
+        #     self.get_logger().error('OPENAI_API_KEY is not set.')
+        #     return None
+
+        # print(skills)
         skill_lines = '\n'.join(
-            f"- id:{s['id']} type:{s['type']} op:{s.get('operation')} pose:{s.get('pose')}"
-            f"{' height:' + str(s['height']) if (s.get('type') == 'manipulate' and str(s.get('operation') or '').lower() == 'place' and 'height' in s) else ''} "
-            f"{s.get('description')}"
+            f"- id:{s['id']} type:{s['type']} op:{s.get('operation')} pose:{s.get('pose')} {s.get('description')}"
             for s in skills
         )
         user_prompt = (
-            f"Chinese Instruction: {instruction} translating this into English before further actions\n"
+            f"Instruction: {instruction}\n"
             "Using only the skills below, return JSON {\"actions\": [...]}.\n"
             "Each action must have \"type\" (navigate|manipulate) and \"target\" (skill id).\n"
             "For manipulate include \"operation\" (pick/place/store) and optional \"height\" in meters.\n"
@@ -418,44 +413,61 @@ class MobileManipulatorInterface(Node):
         )
         sys_prompt = 'Plan sequential steps for a mobile manipulator and answer with JSON only.'
         try:
+            # if OpenAI is not None:
+            #     client = OpenAI(api_key=api_key)
+            #     resp = client.responses.create(
+            #         model=model,
+            #         input=[{'role': 'system', 'content': sys_prompt},
+            #                {'role': 'user', 'content': user_prompt}],
+            #         temperature=0.2,
+            #     )
+            #     text = ''.join(
+            #         block.text
+            #         for item in getattr(resp, 'output', [])
+            #         for block in getattr(item, 'content', [])
+            #         if getattr(block, 'type', None) == 'text'
+            #     )
+            # elif openai is not None:
+            #     openai.api_key = api_key
+            #     completion = openai.ChatCompletion.create(
+            #         model=model,
+            #         temperature=0.2,
+            #         messages=[{'role': 'system', 'content': sys_prompt},
+            #                   {'role': 'user', 'content': user_prompt}]
+            #     )
+            #     text = completion['choices'][0]['message']['content']
+            # else:
+            #     self.get_logger().error('OpenAI SDK not installed.')
+            #     return None
+            # client = OpenAI(
+            #     api_key="", 
+            #     # 以下为新加坡地域base_url，若使用北京地域的模型，需将base_url替换为https://dashscope.aliyuncs.com/compatible-mode/v1
+            #     # base_url=""
+            #     base_url=""
+            # )
+            # completion = client.chat.completions.create(
+            #     model="qwen2.5-1.5b-instruct",
+            #     messages=[{"role": "user", "content": "你是谁？"}]
+            # )
+
             client = OpenAI(
                 # openai系列的sdk，包括langchain，都需要这个/v1的后缀
                 base_url='https://api.openai-proxy.org/v1',
                 api_key='sk-s9WYCN6J3aoSqhD7cquadBpA8jvS7s061koYnKF9oOrapFvp',
             )
-            messages = [
-                {
-                    "role": "system",
-                    "content": sys_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ]
-            max_attempts = 3
-            retry_delay = 2.0
-            network_error_keywords = ('network', 'timeout', 'connection', 'temporarily unavailable')
-            chat_completion = None
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    chat_completion = client.chat.completions.create(
-                        messages=messages,
-                        model=model, # 如果是其他兼容模型，比如deepseek，直接这里改模型名即可，其他都不用动
-                    )
-                    break
-                except Exception as exc:
-                    error_text = str(exc).lower()
-                    if any(keyword in error_text for keyword in network_error_keywords):
-                        self.get_logger().warn(
-                            f'OpenAI request network issue (attempt {attempt}/{max_attempts}): {exc}'
-                        )
-                        if attempt < max_attempts:
-                            time.sleep(retry_delay)
-                            continue
-                    raise
-            if chat_completion is None:
-                raise RuntimeError('OpenAI request failed without response.')
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {
+                        "role":"system",
+                        "content":sys_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content":user_prompt
+                    }
+                ],
+                model="gpt-4o-mini", # 如果是其他兼容模型，比如deepseek，直接这里改模型名即可，其他都不用动
+            )
             text = chat_completion.choices[0].message.content #['choices'] #[0]['message']['content']
             print(text)
 
@@ -474,7 +486,6 @@ class MobileManipulatorInterface(Node):
 
     def _perform_pick_sequence(self) -> bool:
         try:
-            self.robot.moveJ(self.obs_joint)
             color_image, _, depth_data = self.get_observation()
             self.tcp2base = self.robot.get_RT_matrix()
             self.tcp2base[:3, 3] = self.tcp2base[:3, 3] / 1000
@@ -496,7 +507,6 @@ class MobileManipulatorInterface(Node):
             return False
 
     def _perform_place_sequence(self, height: float) -> bool:
-        # print(f"place at: {height}\n")
         try:
             self.place_at_fixed_height(height)
             return True
@@ -517,7 +527,7 @@ class MobileManipulatorInterface(Node):
                 "id": "yellow_table_nav",
                 "type": "navigate",
                 "pose": 
-                GeoPose(position=Point(x=-1.879, y=-1.178, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=0.703, w=0.711)),
+                GeoPose(position=Point(x=-1.349, y=-1.188, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=1.0, w=0.004)),
                 "description": "Base pose facing the yellow table."
             },
             {
@@ -527,77 +537,26 @@ class MobileManipulatorInterface(Node):
                 "description": "Use vision grasp pipeline on the yellow table cup."
             },
             {
-                "id": "white_table_pick",
-                "type": "manipulate",
-                "operation": "pick",
-                "description": "Use vision grasp pipeline on the white table cup."
-            },
-            {
                 "id": "white_table_nav",
                 "type": "navigate",
-                "pose": GeoPose(position=Point(x=0.242, y=-2.133, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=0.728, w=0.685)),
+                "pose": GeoPose(position=Point(x=-0.443, y=1.014, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=-1.0, w=0.001)),
                 "description": "Base pose near the white table."
             },
             {
                 "id": "white_table_place",
                 "type": "manipulate",
                 "operation": "place",
-                "height": 0.75,
-                "description": "Place the cup onto the white table ."
-            },
-            {
-                "id": "yellow_table_place",
-                "type": "manipulate",
-                "operation": "place",
-                "height": 0.73,
-                "description": "Place the cup onto the yellow table ."
-            },
-            {
-                "id": "pool_place",
-                "type": "manipulate",
-                "operation": "place",
-                "height": 0.71,
-                "description": "Place the cup near the poor ."
-            },
-            {
-                "id": "pool_nav",
-                "type": "navigate",
-                "pose": GeoPose(position=Point(x=-3.929, y=2.864, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=-0.691, w=0.723)),
-                "description": "Base pose near the pool."
-            },
-            {
-                "id": "podium_place",
-                "type": "manipulate",
-                "operation": "place",
-                "height": 0.733,
-                "description": "Place the cup onto the podium ."
-            },
-            {
-                "id": "podium_nav",
-                "type": "navigate",
-                "pose": GeoPose(position=Point(x=0.052, y=3.236, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=-0.711, w=0.703)),
-                "description": "Base pose near the podium ."
-            },
-            # {
-            #     "id": "white_plate_place",
-            #     "type": "manipulate",
-            #     "operation": "place",
-            #     "height": 0.733,
-            #     "description": "Place the cup onto white plate ."
-            # },
-            # {
-            #     "id": "white_plate_nav",
-            #     "type": "navigate",
-            #     "pose": GeoPose(position=Point(x=0.052, y=3.236, z=0.0),orientation=Quaternion(x=0.000000, y=0.000000, z=-0.711, w=0.703)),
-            #     "description": "Base pose near the white plate ."
-            # },
+                "height": 0.78,
+                "description": "Place the cup onto the white table (0.78 m)."
+            }
         ]
 
-        plan = self._call_openai_planner(instruction, skills, "gpt-3.5-turbo")
+        plan = self._call_openai_planner(instruction, skills, model)
         if not plan:
             return False
-        
+
         print(plan)
+        # return
 
         # plan={
             # "actions": [
@@ -665,7 +624,6 @@ class MobileManipulatorInterface(Node):
                 
                 #pick
                 if operation in ('pick', 'grasp'):
-                    self.robot.moveJ(self.obs_joint)
                     if not self._perform_pick_sequence():
                         return False
                 #place
@@ -1675,52 +1633,7 @@ def main(args=None):
         try:
             if enable_voice_listener:
                 node.echo_info('Waiting for voice instructions on /voice_text ...')
-                # rclpy.spin(node)
-
-                # 主循环：处理ROS消息 + 检查是否收到语音指令
-                while rclpy.ok():
-
-                    # node.echo_info('Waiting for voice instructions on /voice_text ...')
-
-                    # 处理所有订阅回调（包括 /voice_text）
-                    
-                    rclpy.spin_once(node, timeout_sec=0.1)
-
-                    if node.pending_voice_instruction is None:
-                        continue
-
-                    instr = node.pending_voice_instruction
-                    node.pending_voice_instruction = None
-
-                    node.echo_info(f'Start executing latched voice instruction: "{instr}"')
-
-                    success = node.execute_instruction_with_gpt(
-                        instruction=instr,
-                        knowledge_base=[],
-                    )
-
-                    node.echo_info(f'Voice pipeline finished, success={success}')
-
-
-                    # # 如果已经拿到一条语音指令，且还没执行过任务，就在这里执行
-                    # if node.pending_voice_instruction is not None and not node.voice_task_done:
-                    #     instr = node.pending_voice_instruction
-
-                    #     node.echo_info(f'Start executing latched voice instruction: "{instr}"')
-
-                    #     success = node.execute_instruction_with_gpt(
-                    #         instruction=instr,
-                    #         knowledge_base=[],
-                    #     )
-                    #     node.pending_voice_instruction = None
-
-                    #     node.voice_task_done = True
-                    #     node.echo_info(f'Voice pipeline finished, success={success}')
-
-                            # 如果只想执行一轮任务就退出，可以 break
-                            # break
-
-                # 如果上面用了 break 跳出循环，就会走到这里
+                rclpy.spin(node)
             else:
                 # node.run()
                 instruction="pick the cup on the white desk, and place it on the yellow desk"
