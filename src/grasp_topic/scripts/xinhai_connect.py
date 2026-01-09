@@ -418,11 +418,19 @@ class MobileManipulatorInterface(Node):
         )
         sys_prompt = 'Plan sequential steps for a mobile manipulator and answer with JSON only.'
         try:
+            # client = OpenAI(
+            #     # openai系列的sdk，包括langchain，都需要这个/v1的后缀
+            #     base_url='https://api.openai-proxy.org/v1',
+            #     api_key='',
+            # )
+
+            # ------ 新增本地部署的xinhai模型调用 ------
             client = OpenAI(
-                # openai系列的sdk，包括langchain，都需要这个/v1的后缀
-                base_url='https://api.openai-proxy.org/v1',
-                api_key='sk-s9WYCN6J3aoSqhD7cquadBpA8jvS7s061koYnKF9oOrapFvp',
+                base_url='http://192.168.3.145:30120/v1',
+                api_key='',  # 文档没要求鉴权就可留空；若网关要求再填
             )
+            # ------ 新增本地部署的xinhai模型调用 ------
+
             messages = [
                 {
                     "role": "system",
@@ -593,7 +601,15 @@ class MobileManipulatorInterface(Node):
             # },
         ]
 
-        plan = self._call_openai_planner(instruction, skills, "gpt-3.5-turbo")
+        # plan = self._call_openai_planner(instruction, skills, "gpt-3.5-turbo")
+
+
+        # ------ 新增本地部署的xinhai模型调用 ------
+        plan = self._call_openai_planner(instruction, skills, "对话")
+        # 或 "推理"
+        # ------ 新增本地部署的xinhai模型调用 ------
+
+
         if not plan:
             return False
         
