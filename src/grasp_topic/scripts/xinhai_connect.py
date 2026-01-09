@@ -119,6 +119,9 @@ class MobileManipulatorInterface(Node):
         self.align = rs.align(rs.stream.color)
         self.echo_info('=> Camera initialized!')
 
+        self.planner_model = os.environ.get("PLANNER_MODEL", "对话")
+        self.get_logger().info(f"Planner model: {self.planner_model}")
+
         # Voice instruction handling
         self.voice_processing = False
         self.voice_sub = self.create_subscription(
@@ -605,7 +608,7 @@ class MobileManipulatorInterface(Node):
 
 
         # ------ 新增本地部署的xinhai模型调用 ------
-        plan = self._call_openai_planner(instruction, skills, "对话")
+        plan = self._call_openai_planner(instruction, skills, self.planner_model)
         # 或 "推理"
         # ------ 新增本地部署的xinhai模型调用 ------
 
