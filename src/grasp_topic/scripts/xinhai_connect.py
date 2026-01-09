@@ -121,6 +121,12 @@ class MobileManipulatorInterface(Node):
 
         self.planner_model = os.environ.get("PLANNER_MODEL", "对话")
         self.get_logger().info(f"Planner model: {self.planner_model}")
+        self.base_url = os.environ.get(
+            "OPENAI_BASE_URL", 
+            "http://192.168.3.145:30120/v1"
+        )
+        self.get_logger().info(f"OpenAI base_url = {self.base_url}")
+
 
         # Voice instruction handling
         self.voice_processing = False
@@ -429,7 +435,7 @@ class MobileManipulatorInterface(Node):
 
             # ------ 新增本地部署的xinhai模型调用 ------
             client = OpenAI(
-                base_url='http://192.168.3.145:30120/v1',
+                base_url=self.base_url,
                 api_key='',  # 文档没要求鉴权就可留空；若网关要求再填
             )
             # ------ 新增本地部署的xinhai模型调用 ------
